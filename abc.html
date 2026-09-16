@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Bộ điều khiển ESP32 Car</title>
+  <script src="https://unpkg.com/html5-qrcode"></script>
+  <style>
+    * { box-sizing: border-box; touch-action: manipulation; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #121212; color: #fff; margin: 0; padding: 20px; text-align: center; }
+    .screen { display: none; max-width: 400px; margin: auto; }
+    .active { display: block; }
+    button { background: #007bff; color: white; border: none; padding: 14px 24px; font-size: 16px; border-radius: 8px; margin: 10px 0; cursor: pointer; width: 100%; }
+    button:active { background: #0056b3; }
+    #reader { width: 100%; border-radius: 8px; overflow: hidden; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 20px auto; width: 260px; }
+    .btn-ctrl { background: #28a745; height: 75px; font-size: 24px; font-weight: bold; margin: 0; border-radius: 12px; }
+    .btn-stop { background: #dc3545; }
+    .slider { width: 100%; margin: 15px 0; }
+    .info { color: #aaa; font-size: 14px; margin-top: 5px; }
+  </style>
+</head>
+<body>
+
+  <!-- Màn hình 1: Quét QR -->
+  <div id="screen-qr" class="screen active">
+    <h2>Xác thực xe ESP32</h2>
+    <p class="info">Quét mã QR dán trên thân xe để bắt đầu</p>
+    <div id="reader"></div>
+  </div>
+
+  <!-- Màn hình 2: Chọn phương thức kết nối -->
+  <div id="screen-select" class="screen">
+    <h2>Chọn phương thức</h2>
+    <p id="car-info" class="info"></p>
+    <button onclick="connectWiFi()">1. Kết nối qua Wi-Fi (AP)</button>
+    <button onclick="connectBluetooth()">2. Kết nối qua Bluetooth (BLE)</button>
+    <p id="ble-warning" class="info" style="color: #ffc107; display: none;">
+      Lưu ý: Safari trên iOS không hỗ trợ Web Bluetooth trực tiếp. Vui lòng chọn Wi-Fi.
+    </p>
+  </div>
+
+  <!-- Màn hình 3: Giao diện điều khiển -->
+  <div id="screen-ctrl" class="screen">
+    <h3 id="conn-status">Đã kết nối</h3>
+    <label>Tốc độ: <span id="spd-val">200</span></label>
+    <input type="range" min="100" max="255" value="200" class="slider" oninput="changeSpeed(this.value)">
+
+    <div class="grid">
+      <div></div>
+      <button class="btn-ctrl" ontouchstart="sendCmd('F')" ontouchend="sendCmd('S')" onmousedown="sendCmd('F')" onmouseup="sendCmd('S')">▲</button>
+      <div></div>
+      <button class="btn-ctrl" ontouchstart="sendCmd('L')" ontouchend="sendCmd('S')" onmousedown="sendCmd('L')" onmouseup="sendCmd('S')">◀</button>
+      <button class="btn-ctrl btn-stop" onclick="sendCmd('S')">■</button>
+      <button class="btn-ctrl" ontouchstart="sendCmd('R')" ontouchend="sendCmd('S')" onmousedown="sendCmd('R')" onmouseup="sendCmd('R')">▶</button>
+      <div></div>
+      <button class="btn-ctrl" ontouchstart="sendCmd('B')" ontouchend="sendCmd('S')" onmousedown="sendCmd('B')" onmouseup="sendCmd('B')">▼</button>
+      <div></div>
+    </div>
+  </div>
+
+  <script>
+    let carData = null;
+    let ws = null;
+    let bleChar = null;
+    let currentMode = "";
+
+    const BLE_SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+    const BLE_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+
+    // Khởi tạo quét QR
+    const html5QrCode = new Html5Qrcode("reader");
+    html5QrCode.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: 250 },
+      (qrText) => {
+        try {
+          carData = JSON.parse(qrText);
+          if (carData.id && carData.tok) {
+            html5QrCode.stop();
+            showScreen("screen-select");
+            document.getElementById("car-info").innerText = "Đã nhận diện: " + carData.id;
+            if (!navigator.bluetooth) {
+              document.getElementById("ble-warning").style.display = "block";
+            }
+          }
+        } catch (e) {
+          console.error("QR không đúng định dạng JSON");
+        }
+      }
+    ).catch(err => console.error(err));
+
+    function showScreen(id) {
+      document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
+      document.getElementById(id).classList.add("active");
+    }
+
+    // Kết nối Wi-Fi (WebSocket)
+    function connectWiFi() {
+      currentMode = "WIFI";
+      ws = new WebSocket("ws://192.168.4.1/ws");
+      ws.onopen = () => {
+        ws.send("AUTH:" + carData.tok);
+        showScreen("screen-ctrl");
+        document.getElementById("conn-status").innerText = "Chế độ: Wi-Fi AP";
+      };
+      ws.onerror = () => {
+        alert("Không thể kết nối! Hãy chắc chắn điện thoại đã vào mạng Wi-Fi của xe.");
+      };
+    }
+
+    // Kết nối Bluetooth (Web Bluetooth API)
+    async function connectBluetooth() {
+      if (!navigator.bluetooth) {
+        alert("Trình duyệt này không hỗ trợ Web Bluetooth. Hãy dùng trình duyệt Chrome trên Android hoặc đổi sang chế độ Wi-Fi.");
+        return;
+      }
+      try {
+        currentMode = "BLE";
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [{ name: carData.id }],
+          optionalServices: [BLE_SERVICE_UUID]
+        });
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService(BLE_SERVICE_UUID);
+        bleChar = await service.getCharacteristic(BLE_CHAR_UUID);
+        
+        await sendBle("AUTH:" + carData.tok);
+        showScreen("screen-ctrl");
+        document.getElementById("conn-status").innerText = "Chế độ: Bluetooth BLE";
+      } catch (err) {
+        alert("Lỗi kết nối Bluetooth: " + err);
+      }
+    }
+
+    function sendCmd(cmd) {
+      if (currentMode === "WIFI" && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(cmd);
+      } else if (currentMode === "BLE" && bleChar) {
+        sendBle(cmd);
+      }
+    }
+
+    async function sendBle(data) {
+      try {
+        let enc = new TextEncoder();
+        await bleChar.writeValue(enc.encode(data));
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function changeSpeed(val) {
+      document.getElementById("spd-val").innerText = val;
+      sendCmd("SPEED:" + val);
+    }
+  </script>
+</body>
+</html>
